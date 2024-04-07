@@ -712,9 +712,12 @@ dependencies = [
  "lazy_static",
  "listenfd",
  "ndarray",
+ "netcdf",
+ "peak_alloc",
  "peroxide",
  "reqwest",
  "serde",
+ "serde_json",
  "tokio",
  "tokio-tar",
 ]
@@ -898,20 +901,20 @@ dependencies = [
 
 [[package]]
 name = "netcdf"
-version = "0.7.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9668c493289156ed0dce9472ea33ab7a6f6dfe4565a8433bd103995f8053b467"
+checksum = "5a2302836c14255099bb529b7b830ffed9a3dd76099a65367abd36f526b5f24b"
 dependencies = [
- "bitflags 1.3.2",
- "lazy_static",
+ "bitflags 2.5.0",
+ "ndarray",
  "netcdf-sys",
 ]
 
 [[package]]
 name = "netcdf-sys"
-version = "0.4.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e52d92dd7d87feaad8b998db333ac28897b60dfa738f4705c2236bd55035655"
+checksum = "3fc585a3c0dfd225183529a402667bd48f7ac14c0bcaf3e1336fb7f8ccdaa1db"
 dependencies = [
  "hdf5-sys",
  "libz-sys",
@@ -1066,6 +1069,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "peak_alloc"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29c4e8e2dd832fd76346468f822e4e600d30ba4e5aa545a128abf12cfae7ea3e"
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1078,7 +1087,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "862dbe06b505e9778df88403d674c4474fed4e540fffd2519271707a8ed23a26"
 dependencies = [
  "matrixmultiply",
- "netcdf",
  "order-stat",
  "peroxide-ad",
  "peroxide-num",

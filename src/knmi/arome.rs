@@ -1,0 +1,204 @@
+use std::collections::HashMap;
+use lazy_static::lazy_static;
+use axum::{
+    response::{IntoResponse, Response},
+    extract::{Path, Query, Json}
+};
+use ndarray::{Array3, Array2,Array1, ArrayView, Axis};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, Number};
+use reqwest::StatusCode;
+use anyhow::{Result};
+
+use super::models::arome::Arome;
+
+#[derive(Serialize, Deserialize, Debug)]
+struct Coordinates {
+    lat: f64,
+    lon: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ForecastInput {
+    coords: Coordinates,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ForecastItem {
+    timestamp: i64,
+    above_ground_200m_v_component_of_wind: i64,
+    above_ground_100m_u_component_of_wind: i64,
+    above_ground_0m_mean_sea_level_pressure: i64,
+    above_ground_200m_u_component_of_wind: i64,
+    above_ground_100m_temperature: i64,
+    above_ground_10m_u_component_max_squall: i64,
+    surface_low_cloud_cover: i64,
+    surface_accum_snow_water: i64,
+    surface_instant_snow_water: i64,
+    surface_medium_cloud_cover: i64,
+    above_ground_2m_temperature: i64,
+    surface_global_radiation: i64,
+    surface_temperature: i64,
+    above_ground_10m_u_component_of_wind: i64,
+    surface_unknown_code_81: i64,
+    surface_high_cloud_cover: i64,
+    surface_boundary_layer_height: i64,
+    surface_sensible_heat_flux: i64,
+    surface_net_short_wave_radiation: i64,
+    above_ground_0m_cloud_base: i64,
+    above_ground_10m_v_component_max_squall: i64,
+    above_ground_50m_temperature: i64,
+    above_ground_50m_v_component_of_wind: i64,
+    surface_latent_heat_flux: i64,
+    surface_accum_graupel: i64,
+    above_ground_0m_instant_graupel: i64,
+    surface_unknown_code_20: i64,
+    above_ground_2m_relative_humidity: i64,
+    surface_net_long_wave_radiation: i64,
+    surface_cloud_cover: i64,
+    surface_instant_graupel: i64,
+    surface_accum_rain_water: i64,
+    above_ground_300m_temperature: i64,
+    above_ground_10m_v_component_of_wind: i64,
+    above_ground_300m_u_component_of_wind: i64,
+    above_ground_300m_v_component_of_wind: i64,
+    above_ground_100m_v_component_of_wind: i64,
+    above_ground_200m_temperature: i64,
+    surface_geopotential: i64,
+    surface_mean_sea_level_pressure: i64,
+    above_ground_50m_u_component_of_wind: i64,
+    surface_snow_depth: i64,
+    surface_instant_rain_water: i64,
+}
+
+const nc_keys: &[&str] = &[
+    "200m_above_ground_v_component_of_wind",
+    "100m_above_ground_u_component_of_wind",
+    "0m_above_ground_mean_sea_level_pressure",
+    "200m_above_ground_u_component_of_wind",
+    "surface_unknown_code_61",
+    "100m_above_ground_temperature",
+    "10m_above_ground_u_component_max_squall",
+    "surface_low_cloud_cover",
+    "surface_accum_snow_water",
+    "surface_instant_snow_water",
+    "2m_above_ground_unknown_code_17",
+    "surface_medium_cloud_cover",
+    "2m_above_ground_temperature",
+    "surface_global_radiation",
+    "surface_temperature",
+    "10m_above_ground_u_component_of_wind",
+    "surface_unknown_code_81",
+    "surface_high_cloud_cover",
+    "surface_boundary_layer_height",
+    "surface_sensible_heat_flux",
+    "surface_net_short_wave_radiation",
+    "0m_above_ground_cloud_base",
+    "10m_above_ground_v_component_max_squall",
+    "50m_above_ground_temperature",
+    "50m_above_ground_v_component_of_wind",
+    "surface_latent_heat_flux",
+    "surface_accum_graupel",
+    "0m_above_ground_instant_graupel",
+    "surface_unknown_code_20",
+    "2m_above_ground_relative_humidity",
+    "surface_net_long_wave_radiation",
+    "surface_cloud_cover",
+    "surface_instant_graupel",
+    "surface_accum_rain_water",
+    "300m_above_ground_temperature",
+    "10m_above_ground_v_component_of_wind",
+    "surface_temperature - Extra copy",
+    "300m_above_ground_u_component_of_wind",
+    "300m_above_ground_v_component_of_wind",
+    "100m_above_ground_v_component_of_wind",
+    "200m_above_ground_temperature",
+    "surface_geopotential",
+    "surface_mean_sea_level_pressure",
+    "50m_above_ground_u_component_of_wind",
+    "surface_snow_depth",
+    "surface_instant_rain_water"
+];
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Forecast {
+    forecast: Vec<ForecastItem>,
+}
+
+pub async fn forecast (Json(payload): Json<ForecastInput>) -> Response {
+
+    let arome = Arome::new();
+
+    println!("{:?}", payload.coords);
+
+    let (lat, lon) = arome.closest_coords_position(payload.coords.lat, payload.coords.lon);
+
+    println!("{:?}", (lat, lon));
+    println!("{:?}", (arome.latitudes[lat], arome.longitudes[lon]));
+
+    match extract_forecast(lat, lon).await {
+        Ok(forecast) => {
+            return Json(forecast).into_response();
+        },
+        Err(err) => {
+            println!("{:?}", err);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read grib").into_response();
+        }
+    }
+}
+
+async fn extract_forecast (lat: usize, lon: usize) -> Result<Vec<Value>> {
+
+    // let mut data = Forecast {
+    //     forecast: vec![],
+    // };
+    
+    let mut nc_map: HashMap<String, Array3<f64>> = HashMap::new();
+    let mut data = vec![];
+
+    let nc_file = netcdf::open("./download/nc/test.nc")?;
+
+    let var_prediction_date = &nc_file.variable("prediction_date").unwrap();
+    let mut prediction_date = Array1::<f64>::zeros(48);
+    var_prediction_date.get_into(48.., prediction_date.view_mut()).unwrap();
+
+    for index in 0..48 {
+
+        let mut map = Map::new();
+        
+        for key in nc_keys.into_iter() {
+            map.insert(
+                key.to_string(), 
+                Value::Number(Number::from_f64(
+                    read_nc_field(&mut nc_map, &nc_file, key, [index, lat, lon]).unwrap()
+                ).unwrap())
+            );
+        }
+
+        // let forecast_item = ForecastItem {
+        //     timestamp: prediction_date[index],
+        //     surface_cloud_cover: 0.0,
+        //     surface_global_radiation: read_nc_field(&nc_file, "surface_global_radiation").unwrap()[[index, lat, lon]],
+        // };
+
+        map.insert("timestamp".to_string(), Value::Number(Number::from_f64(
+            prediction_date[index]
+        ).unwrap()));
+
+        data.push(Value::Object(map));
+    }
+
+    Ok(data)
+}
+
+fn read_nc_field (nc_map: &mut HashMap<String, Array3<f64>>, nc: &netcdf::File, field: &str, index: [usize; 3]) -> Result<f64> {
+
+    if !nc_map.contains_key(field) {
+        let var = &nc.variable(field).unwrap();
+        let mut data = Array3::<f64>::zeros((48, 300, 300));
+        var.get_into((48.., .., ..), data.view_mut()).unwrap();
+        nc_map.insert(field.to_string(), data);
+    }
+
+    Ok(nc_map.get(field).unwrap()[index])
+}

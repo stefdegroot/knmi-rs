@@ -1,24 +1,30 @@
 use futures_util::StreamExt;
-use ndarray::array;
+use ndarray::{Array3, Array2,Array1, ArrayView, Axis};
 use reqwest::StatusCode;
 use tokio::{
-    fs::File,
-    io::{AsyncWriteExt, BufReader},
+    fs::{File},
+    io::{AsyncWriteExt,},
 };
-use std::path::Path;
+use std::{collections::hash_map, ffi::OsString, fmt::format, path::{Path, PathBuf}};
 use serde::{Deserialize, Serialize};
 use axum::{
-    response::{IntoResponse, Response}
+    response::{Response, IntoResponse}
 };
-use anyhow::Result;
+use anyhow::{Result, Error};
 use tokio_tar::Archive;
-use eccodes::{CodesHandle, KeyType, ProductKind};
+use eccodes::{codes_handle::GribFile, CodesHandle, KeyType, KeyedMessage, ProductKind};
 use eccodes::FallibleStreamingIterator;
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use peroxide::prelude::*;
 use peroxide::fuga::*;
 use crate::knmi::models::arome;
+use netcdf;
+use tokio::fs;
+use std::collections::HashMap;
+use peak_alloc::PeakAlloc;
 
+#[global_allocator]
+static PEAK_ALLOC: PeakAlloc = PeakAlloc;
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -70,15 +76,255 @@ pub async fn download () -> Response {
     //     }
     // }
 
-    match read_grib().await {
+    // match read_nc().await {
+    match parse_grib().await {
         Ok(_) => (),
         Err(err) => {
             println!("{:?}", err);
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read grib").into_response()
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read grib").into_response();
         }
     }
 
     (StatusCode::OK, "File downloaded successfully.").into_response()
+    
+}
+
+async fn read_nc () -> Result<()> {
+    let current_mem = PEAK_ALLOC.current_usage_as_mb();
+	println!("This program currently uses {} MB of RAM.", current_mem);
+	let peak_mem = PEAK_ALLOC.peak_usage_as_gb();
+	println!("The max amount that was used {}", peak_mem);
+
+    let nc_file = netcdf::open("./download/nc/test.nc")?;
+
+    let var_surface_global_radiation = &nc_file.variable("surface_global_radiation").unwrap();
+    let mut surface_global_radiation = Array3::<f64>::zeros((48, 300, 300));
+    var_surface_global_radiation.get_into((48.., .., ..), surface_global_radiation.view_mut()).unwrap();
+ 
+    let for_coords: Vec<f64> = surface_global_radiation.outer_iter().map(|f| f[[10, 10]]).collect();
+
+    println!("surface_global_radiation: ");
+    println!("{:?}",  for_coords);
+
+    let var_prediction_date = &nc_file.variable("prediction_date").unwrap();
+    let mut prediction_date = Array1::<i64>::zeros(48);
+    var_prediction_date.get_into(48.., prediction_date.view_mut()).unwrap();
+
+    println!("prediction_date: ");
+    println!("{:?}", prediction_date.to_vec());
+
+    let var_latitudes = &nc_file.variable("latitudes").unwrap();
+    let mut latitudes = Array1::<f64>::zeros(300);
+    var_latitudes.get_into(.., latitudes.view_mut()).unwrap();
+
+    println!("latitudes: ");
+    println!("{:?}", latitudes.to_vec());
+
+    let var_longitudes = &nc_file.variable("longitudes").unwrap();
+    let mut longitudes = Array1::<f64>::zeros(300);
+    var_longitudes.get_into(.., longitudes.view_mut()).unwrap();
+
+    println!("longitudes: ");
+    println!("{:?}", longitudes.to_vec());
+
+    let current_mem = PEAK_ALLOC.current_usage_as_mb();
+	println!("This program currently uses {} MB of RAM.", current_mem);
+	let peak_mem = PEAK_ALLOC.peak_usage_as_gb();
+	println!("The max amount that was used {}", peak_mem);
+
+    Ok(())
+}
+
+async fn parse_grib () -> Result<()> {
+
+    let path = "./download/harm40_v1_p1_2024032806";
+    let mut nc_file = netcdf::create("./download/nc/test.nc")?;
+    let files = list_dir(path).await?;
+    let mut field_map = HashMap::<String, Array3<f64>>::new();
+    let mut latitudes: Vec<f64> = vec![];
+    let mut longitudes: Vec<f64> = vec![];
+    let mut prediction_dates: Vec<i64> = vec![];
+
+    nc_file.add_unlimited_dimension("time")?;
+    nc_file.add_dimension("lat", 300)?;
+    nc_file.add_dimension("lon", 300)?;
+    
+    let mut i = 0;
+
+    for (file_path, file_name) in files {
+
+        if i == 0 {
+            i = 1;
+            continue;
+        }
+        
+        let mut handle = CodesHandle::new_from_file(&file_path, ProductKind::GRIB)?;
+        let (date, prediction_date) = filename_to_dates(&file_name)?;
+        
+        println!("filename: {:?} - {:?} - {:?}", file_name, date, prediction_date);
+
+        prediction_dates.push(prediction_date.timestamp_millis());
+
+        while let Some(msg) = handle.next()? {
+
+            if !(read_grib_string(msg, "gridType")? == "regular_ll") {
+                continue;
+            }
+
+            let parameter_name = read_grib_string(msg, "parameterName")?;
+            let mut field_name = read_field_name(msg, &parameter_name)?;
+
+            if read_grib_i64(msg, "level")? == 0 && read_grib_string(msg, "typeOfLevel")? == "heightAboveGround" {
+                field_name = format!("surface_{field_name}");
+            } else {
+                let level = read_grib_i64(msg, "level")?;
+                field_name = format!("{level}m_above_ground_{field_name}");
+            }
+
+            if latitudes.is_empty() && longitudes.is_empty() {
+                println!("Building cooridinates.");
+                (latitudes, longitudes) = build_coordinates_grid(msg)?;
+            }
+
+            let array2 = msg.to_ndarray()?;
+
+            if field_map.contains_key(&field_name) {
+                let mut array3 = field_map.get_mut(&field_name).unwrap();
+                array3.push(Axis(0), ArrayView::from(&array2)).unwrap();
+            } else {
+                let mut array3 = Array3::<f64>::default((0, 300, 300));
+                array3.push(Axis(0), ArrayView::from(&array2)).unwrap();
+                field_map.insert(field_name, array3);
+            }
+        }
+    }
+
+    for (key, value) in field_map.into_iter() {
+        println!("saving {} to nc file", key);
+        let mut var = nc_file.add_variable::<f64>(&key, &["time", "lat", "lon"])?;
+        var.put((48.., .., ..), value.view())?;
+    }
+
+    let mut prediction_date_var = nc_file.add_variable::<i64>("prediction_date", &["time"])?;
+    prediction_date_var.put_values(&prediction_dates, 48..)?;
+
+    let mut latitudes_var = nc_file.add_variable::<f64>("latitudes", &["lat"])?;
+    latitudes_var.put_values(&latitudes, ..)?;
+
+    let mut longitudes_var = nc_file.add_variable::<f64>("longitudes", &["lon"])?;
+    longitudes_var.put_values(&longitudes, ..)?;
+    
+    println!("finished parsing grib files to nc");
+    
+    Ok(())
+}
+
+fn build_coordinates_grid (msg: &KeyedMessage) -> Result<(Vec<f64>, Vec<f64>)> {
+
+    let min_lat = read_grib_f64(msg, "latitudeOfFirstGridPointInDegrees")?;
+    let max_lat = read_grib_f64(msg, "latitudeOfLastGridPointInDegrees")?;
+
+    let min_lon = read_grib_f64(msg, "longitudeOfFirstGridPointInDegrees")?;
+    let max_lon = read_grib_f64(msg, "longitudeOfLastGridPointInDegrees")?;
+
+    let step_lat = read_grib_u32(msg, "jDirectionIncrement")?;
+    let step_lon = read_grib_u32(msg, "iDirectionIncrement")?;
+
+    let latitudes = seq(
+        min_lat * 1_000.0,
+        max_lat * 1_000.0,
+        step_lat,
+    ).fmap(|v| v / 1_000.0);
+
+    let longitudes = seq(
+        min_lon * 1_000.0,
+        max_lon * 1_000.0,
+        step_lon,
+    ).fmap(|v| v / 1_000.0);
+
+    Ok((latitudes, longitudes))
+}
+
+fn read_field_name (msg: &KeyedMessage, parameter_name: &str) -> Result<String> {
+    let name = match arome::VAR_MAP.get_key_value(&parameter_name[..]) {
+        Some((_key, value)) => {
+
+            let name;
+
+            if value.starts_with("_") {
+                name = format!("{}{}", read_grib_string(msg, "stepType")?, value);
+            } else {
+                name = value.to_string();
+            }
+            
+            name
+        },
+        None => format!("unknown_code_{}", parameter_name),
+    };
+
+    Ok(name)
+}
+
+fn read_grib_string (msg: &KeyedMessage, key: &str) -> Result<String> {
+    let string = format!("{:?}", msg.read_key(key)?.value)
+        .replace("Str(\"", "")
+        .replace("\")", "");
+    Ok(string)
+}
+
+fn read_grib_f64 (msg: &KeyedMessage, key: &str) -> Result<f64> {
+    let float =  format!("{:?}", msg.read_key(key)?.value)
+        .replace("Float(", "")
+        .replace(")", "")
+        .parse::<f64>()?;
+    Ok(float)
+}
+
+fn read_grib_i64 (msg: &KeyedMessage, key: &str) -> Result<i64> {
+    let int =  format!("{:?}", msg.read_key(key)?.value)
+        .replace("Int(", "")
+        .replace(")", "")
+        .parse::<i64>()?;
+    Ok(int)
+}
+
+fn read_grib_u32 (msg: &KeyedMessage, key: &str) -> Result<u32> {
+    let int =  format!("{:?}", msg.read_key(key)?.value)
+        .replace("Int(", "")
+        .replace(")", "")
+        .parse::<u32>()?;
+    Ok(int)
+}
+
+async fn list_dir (path: &str) -> Result<Vec<(PathBuf, String)>> {
+
+    let mut dir = tokio::fs::read_dir(path).await?;
+    let mut files = Vec::new();
+
+    while let Some(entry) = dir.next_entry().await? {
+        if let Ok(name) = entry.file_name().into_string() {
+            files.push((entry.path(), name))
+        } else {
+            println!("failed to parse name")
+        }
+    }
+
+    files.sort();
+
+    Ok(files)
+}
+
+fn filename_to_dates (filename: &str) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
+
+    let year = filename[9..13].parse::<i32>()?;
+    let month = filename[13..15].parse::<u32>()?;
+    let day = filename[15..17].parse::<u32>()?;
+    let hour = filename[17..19].parse::<u32>()?;
+    let prediction_hour = filename[22..25].parse::<i64>()?;
+    let date = Utc.with_ymd_and_hms(year, month, day, hour, 0, 0).unwrap();
+    let prediction_date = Utc.timestamp_millis_opt(date.timestamp_millis() + (prediction_hour * 3600 * 1000)).unwrap();
+
+    Ok((date, prediction_date))
 }
 
 async fn read_grib () -> Result<()> {
@@ -112,6 +358,10 @@ async fn read_grib () -> Result<()> {
 
     let mut field_name;
     let mut message_dataset = DataFrame::new(vec![]);
+
+    let mut lat: usize = 0;
+    let mut lon: usize = 0;
+    let mut array_2 = Array3::<f64>::default((0, 300, 300));
 
     while let Some(msg) = handle.next()? {
 
@@ -165,12 +415,12 @@ async fn read_grib () -> Result<()> {
         let step_lat = format!("{:?}", msg.read_key("jDirectionIncrement")?.value).replace("Int(", "").replace(")", "").parse::<u32>()?;
         let step_lon = format!("{:?}", msg.read_key("iDirectionIncrement")?.value).replace("Int(", "").replace(")", "").parse::<u32>()?;
        
-        println!("min_lat: {min_lat}");
-        println!("max_lat: {max_lat}");
-        println!("min_lon: {min_lon}");
-        println!("max_lon: {max_lon}");
-        println!("step_lat: {step_lat}");
-        println!("step_lon: {step_lon}");
+        // println!("min_lat: {min_lat}");
+        // println!("max_lat: {max_lat}");
+        // println!("min_lon: {min_lon}");
+        // println!("max_lon: {max_lon}");
+        // println!("step_lat: {step_lat}");
+        // println!("step_lon: {step_lon}");
 
         let latitudes = seq(
             min_lat * 1_000.0,
@@ -194,25 +444,46 @@ async fn read_grib () -> Result<()> {
         let array = msg.to_ndarray()?;
         println!("ndarray cols: {}", array.ncols());
         println!("ndarray rows: {}", array.nrows());
+        // println!("{:?}", msg.to_lons_lats_values());
 
-        message_dataset.push(&field_name, Series::new(array.into_raw_vec()));
+        lat = latitudes.iter().position(|&l| l == 52.036).unwrap();
+        lon = longitudes.iter().position(|&l| l == 5.661).unwrap();
+
+        println!("latitude index: {:?}", lat);
+        println!("longitude index: {:?}", lon);
+        println!("ndarray ({}, {}): {:?}", lat, lon, array.get((lat, lon)));
+        println!("ndmi: {:?}", array.ndim());
         
         if msg.read_key("parameterName")?.value == KeyType::Str("117".to_string()) {
 
+            array_2.push(Axis(0), ArrayView::from(&array)).unwrap();
+            array_2.push(Axis(0), ArrayView::from(&array)).unwrap();
+            println!("{:?}", array_2);
+            message_dataset.push(&field_name, Series::new(array_2.clone().into_raw_vec()));
+            
+            // let mut a3 = Array3::default(shape)
+
+            // println!("{:?}",);
+            
             // println!("{:?}", msg.read_key("typeOfLevel")?.value);
             // println!("{:?}", msg.read_key("level")?.value);
             // println!("{:?}", msg.read_key("parameterName")?.value);
             // println!("{:?}", msg.read_key("stepType")?.value);
             // println!("{:?}", msg.read_key("gridType")?.value);
-        
+            
             // let nearest_gridpoints = msg
             //     .codes_nearest()?
             //     .find_nearest(52.0402, 5.6649)?;
-
+            
+            // println!("{:?}", nearest_gridpoints);
+            
             // println!("value: {}, distance: {}",
             //     nearest_gridpoints[3].value,
             //     nearest_gridpoints[3].distance);
+        } else {
+            message_dataset.push(&field_name, Series::new(array.into_raw_vec()));
         }
+        
 
         // let array = msg.to_ndarray()?;
 
@@ -283,7 +554,27 @@ async fn read_grib () -> Result<()> {
         // }
     }
 
-    println!("{:?}", message_dataset.header());
+    // println!("{:?}", message_dataset["surface_global_radiation"].len());
+
+    // let mut test_data = ndarray::Array2::<f64>::zeros((0, 0));
+
+    // println!("{:?}", message_dataset.header());
+
+    // let empty = match message_dataset.write_nc(&format!("/home/stef/rust/knmi-rs/download/nc/{filename}.nc").to_string()) {
+    //     _ => ""
+    // };
+
+    let file = netcdf::open(&format!("/home/stef/rust/knmi-rs/download/nc/{filename}.nc").to_string())?;
+    let global_radiation = &file.variable("surface_global_radiation").expect("");
+
+    let mut data = ndarray::Array1::<f64>::zeros((90000 * 2));
+    global_radiation.get_into((..), data.view_mut()).unwrap();
+    let mut shaped_data = data.into_shape((2, 300, 300)).unwrap();
+
+    println!("{:?}", shaped_data);
+    
+    println!("{:?}", shaped_data.get((0, lat, lon)));
+    println!("{:?}", shaped_data.get((1, lat, lon)));
 
     // let file =  File::open(path).await?;
     // let buffer = BufReader::new(file);

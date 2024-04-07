@@ -1,6 +1,70 @@
-use std::collections::HashMap;
+use core::num;
+use std::{collections::HashMap};
 use lazy_static::lazy_static;
-// use eccodes::KeyType;
+use peroxide::fuga::{seq, FPVector};
+
+#[derive(Debug)]
+pub struct Arome {
+    pub latitudes: Vec<f64>,
+    pub longitudes: Vec<f64>,
+}
+
+impl Arome {
+    pub fn new () -> Self {
+
+        let min_lat = 49.0;
+        let max_lat = 55.877;
+    
+        let min_lon = 0.0;
+        let max_lon = 11.063;
+    
+        let step_lat = 23;
+        let step_lon = 37;
+
+        let latitudes = seq(
+            min_lat * 1_000.0,
+            max_lat * 1_000.0,
+            step_lat,
+        ).fmap(|v| v / 1_000.0);
+    
+        let longitudes = seq(
+            min_lon * 1_000.0,
+            max_lon * 1_000.0,
+            step_lon,
+        ).fmap(|v| v / 1_000.0);
+
+        Self { latitudes, longitudes }
+    }
+
+    pub fn closest_coords_position (&self, lat: f64, lon: f64) -> (usize, usize) {
+        (
+            closest(&self.latitudes, lat), 
+            closest(&self.longitudes, lon)
+        )
+    }
+}
+
+fn closest (vec: &Vec<f64>, value: f64) -> usize {
+
+    let mut closest: usize = 0;
+
+    let max = vec.iter().position(|&l| l >= value).unwrap_or(0);
+
+    if value != vec[max] && max > 0 {
+        let min_dif = vec[max] - value;
+        let max_dif = value - vec[max - 1];
+
+        if min_dif > max_dif {
+            closest = max - 1
+        } else {
+            closest = max
+        }
+    } else {
+        closest = max
+    }
+
+    closest
+}
 
 pub const VAR_LIST: [(&'static str, &'static str); 25] = [
     ("1", "mean_sea_level_pressure"),

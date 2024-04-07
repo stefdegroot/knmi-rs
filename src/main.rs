@@ -18,7 +18,8 @@ async fn main() {
     let app = Router::new()
         .route("/", get(handler))
         .route("/list", get(knmi::files::pull_with_reqwest))
-        .route("/download", get(knmi::download::download));
+        .route("/download", get(knmi::download::download))
+        .route("/weather/knmi-arome", get(knmi::arome::forecast));
 
     let mut listenfd = ListenFd::from_env();
     let listener = match listenfd.take_tcp_listener(0).unwrap() {
