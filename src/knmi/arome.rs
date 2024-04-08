@@ -1,14 +1,16 @@
 use std::collections::HashMap;
 use lazy_static::lazy_static;
 use axum::{
-    response::{IntoResponse, Response},
-    extract::{Path, Query, Json}
+    extract::{Json, Path, Query, State}, response::{IntoResponse, Response}
 };
 use ndarray::{Array3, Array2,Array1, ArrayView, Axis};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, Number};
 use reqwest::StatusCode;
 use anyhow::{Result};
+use std::sync::{Arc, Mutex};
+
+use crate::{knmi::download::PEAK_ALLOC, AppState, NCMap};
 
 use super::models::arome::Arome;
 
@@ -125,7 +127,10 @@ pub struct Forecast {
     forecast: Vec<ForecastItem>,
 }
 
-pub async fn forecast (Json(payload): Json<ForecastInput>) -> Response {
+pub async fn forecast (
+    State(state): State<AppState>,
+    Json(payload): Json<ForecastInput>,
+) -> Response {
 
     let arome = Arome::new();
 
@@ -136,7 +141,7 @@ pub async fn forecast (Json(payload): Json<ForecastInput>) -> Response {
     println!("{:?}", (lat, lon));
     println!("{:?}", (arome.latitudes[lat], arome.longitudes[lon]));
 
-    match extract_forecast(lat, lon).await {
+    match extract_forecast(state.nc_map, lat, lon).await {
         Ok(forecast) => {
             return Json(forecast).into_response();
         },
@@ -147,13 +152,17 @@ pub async fn forecast (Json(payload): Json<ForecastInput>) -> Response {
     }
 }
 
-async fn extract_forecast (lat: usize, lon: usize) -> Result<Vec<Value>> {
+async fn extract_forecast (nc_map: NCMap, lat: usize, lon: usize) -> Result<Vec<Value>> {
 
     // let mut data = Forecast {
     //     forecast: vec![],
     // };
+
+    let current_mem = PEAK_ALLOC.current_usage_as_mb();
+	println!("This program currently uses {} MB of RAM.", current_mem);
+	let peak_mem = PEAK_ALLOC.peak_usage_as_gb();
+	println!("The max amount that was used {}", peak_mem);
     
-    let mut nc_map: HashMap<String, Array3<f64>> = HashMap::new();
     let mut data = vec![];
 
     let nc_file = netcdf::open("./download/nc/test.nc")?;
@@ -170,7 +179,7 @@ async fn extract_forecast (lat: usize, lon: usize) -> Result<Vec<Value>> {
             map.insert(
                 key.to_string(), 
                 Value::Number(Number::from_f64(
-                    read_nc_field(&mut nc_map, &nc_file, key, [index, lat, lon]).unwrap()
+                    read_nc_field(&nc_map, &nc_file, key, [index, lat, lon]).unwrap()
                 ).unwrap())
             );
         }
@@ -188,17 +197,24 @@ async fn extract_forecast (lat: usize, lon: usize) -> Result<Vec<Value>> {
         data.push(Value::Object(map));
     }
 
+    let current_mem = PEAK_ALLOC.current_usage_as_mb();
+	println!("This program currently uses {} MB of RAM.", current_mem);
+	let peak_mem = PEAK_ALLOC.peak_usage_as_gb();
+	println!("The max amount that was used {}", peak_mem);
+
     Ok(data)
 }
 
-fn read_nc_field (nc_map: &mut HashMap<String, Array3<f64>>, nc: &netcdf::File, field: &str, index: [usize; 3]) -> Result<f64> {
+fn read_nc_field (nc_map: &NCMap, nc: &netcdf::File, field: &str, index: [usize; 3]) -> Result<f64> {
 
-    if !nc_map.contains_key(field) {
+    let mut map = nc_map.lock().unwrap();
+
+    if !map.contains_key(field) {
         let var = &nc.variable(field).unwrap();
         let mut data = Array3::<f64>::zeros((48, 300, 300));
         var.get_into((48.., .., ..), data.view_mut()).unwrap();
-        nc_map.insert(field.to_string(), data);
+        map.insert(field.to_string(), data);
     }
 
-    Ok(nc_map.get(field).unwrap()[index])
+    Ok(map.get(field).unwrap()[index])
 }

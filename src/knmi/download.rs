@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use peak_alloc::PeakAlloc;
 
 #[global_allocator]
-static PEAK_ALLOC: PeakAlloc = PeakAlloc;
+pub static PEAK_ALLOC: PeakAlloc = PeakAlloc;
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]

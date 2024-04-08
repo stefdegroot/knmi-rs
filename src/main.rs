@@ -10,16 +10,32 @@ use axum::{
     Router,
     Json
 };
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use ndarray::{Array3};
 
 mod knmi;
 
+pub type NCMap = Arc<Mutex<HashMap<String, Array3<f64>>>>;
+
+#[derive(Clone)]
+pub struct AppState {
+    nc_map: NCMap
+}
+
 #[tokio::main]
 async fn main() {
+
+    let state = AppState {
+        nc_map: Arc::new(Mutex::new(HashMap::new())),
+    };
+
     let app = Router::new()
         .route("/", get(handler))
         .route("/list", get(knmi::files::pull_with_reqwest))
         .route("/download", get(knmi::download::download))
-        .route("/weather/knmi-arome", get(knmi::arome::forecast));
+        .route("/weather/knmi-arome", get(knmi::arome::forecast))
+        .with_state(state);
 
     let mut listenfd = ListenFd::from_env();
     let listener = match listenfd.take_tcp_listener(0).unwrap() {
