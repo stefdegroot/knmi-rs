@@ -1,8 +1,7 @@
+use rumqttc::tokio_rustls::rustls::internal::msgs::message::Message;
 use serde::{Deserialize, Serialize};
-use axum::{
-    response::{IntoResponse, Response},
-    Json
-};
+use tracing::{error, info};
+use crate::{config::CONFIG, knmi::{download::download_and_parse, notifications::MessageData}};
 
 #[derive(Serialize, Deserialize, Debug)]
 struct TestStruct {
@@ -20,7 +19,7 @@ struct DatasetFile {
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
-struct Datasets {
+pub struct Datasets {
     is_truncated: bool,
     result_count: i32,
     files: Vec<DatasetFile>,
@@ -29,57 +28,41 @@ struct Datasets {
     next_page_token: Option<String>,
 }
 
-pub async fn pull_with_reqwest() -> Response {
+pub async fn list_latest_files() -> Result<Datasets, ()> {
 
-    let token = "";
     let url = "https://api.dataplatform.knmi.nl/open-data/v1/datasets/harmonie_arome_cy40_p1/versions/0.2/files";
     
     let reponse = reqwest::Client::new()
         .get(url)
-        .header("Authorization", token)
+        .header("Authorization", &CONFIG.knmi.open_data_api_token)
         .send()
         .await;
 
     let raw_data = match reponse {
         Ok(res) => res,
         Err(err) => {
-            println!("{:?}", err);
-
-            return Json(TestStruct {
-                name: "test model".to_string(),
-            }).into_response();
+            error!("{err}");
+            return Err(());
         }
     };
-
-    // let test = match raw_data.text().await {
-    //     Ok(res) => res,
-    //     Err(err) => {
-    //         println!("{:?}", err);
-
-    //         return Json(TestStruct {
-    //             name: "test model".to_string(),
-    //         }).into_response();
-    //     }
-    // };
-
-    // println!("{:?}", test);
-
-    // Json(TestStruct {
-    //     name: "test model".to_string(),
-    // }).into_response()
 
     let data = match raw_data.json::<Datasets>().await {
         Ok(res) => res,
         Err(err) => {
-            println!("{:?}", err);
-
-            return Json(TestStruct {
-                name: "test model".to_string(),
-            }).into_response();
+            error!("{err}");
+            return Err(());
         }
-    };  
+    };
 
-    println!("{:?}", data);
+    info!(result_count = data.result_count, "Returned:");
 
-    Json(data).into_response()
+    download_and_parse(MessageData {
+        filename: format!("{}", data.files[9].filename),
+        dataset_name: "harmonie_arome_cy40_p1".to_string(),
+        dataset_version: "0.2".to_string(),
+        url: format!("https://api.dataplatform.knmi.nl/open-data/v1/datasets/harmonie_arome_cy40_p1/versions/0.2/files/{}/url",  data.files[9].filename),
+        
+    }).await;
+
+    Ok(data)
 }

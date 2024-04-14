@@ -6,8 +6,11 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+tokio = { version = "1.0", features = ["full", "tracing"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+console-subscriber = "0.2"
 axum = { version = "0.7.0" }
-tokio = { version = "1.0", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 listenfd = "1.0.1"
 serde = { version = "1.0", features = ["derive"] }
@@ -25,3 +28,8 @@ ndarray = "0.15"
 # netcdf = { version = "0.7" }
 netcdf = { version = "0.9", features = ["ndarray"] }
 peak_alloc = "0.2.1"
+toml = "0.8.12"
+serde_derive = "1.0"
+
+uuid = { version = "1.8.0", features = ["v4"] }
+rumqttc = { version = "0.24", features = ["websocket", "use-rustls"] }

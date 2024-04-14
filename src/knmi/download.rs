@@ -1,23 +1,27 @@
-use futures_util::StreamExt;
-use ndarray::{Array3, Array2,Array1, ArrayView, Axis};
+use ndarray::{Array3,Array1, ArrayView, Axis};
 use reqwest::StatusCode;
 use tokio::{
     fs::{File},
     io::{AsyncWriteExt,},
 };
+use tracing::{info, error};
 use std::{collections::hash_map, ffi::OsString, fmt::format, path::{Path, PathBuf}};
 use serde::{Deserialize, Serialize};
 use axum::{
     response::{Response, IntoResponse}
 };
-use anyhow::{Result, Error};
+use anyhow::{Error, Result};
 use tokio_tar::Archive;
 use eccodes::{codes_handle::GribFile, CodesHandle, KeyType, KeyedMessage, ProductKind};
 use eccodes::FallibleStreamingIterator;
 use chrono::{DateTime, TimeZone, Utc};
 use peroxide::prelude::*;
 use peroxide::fuga::*;
-use crate::knmi::models::arome;
+use crate::{
+    knmi::{models::arome, notifications::MessageData},
+    AppState,
+    config::CONFIG,
+};
 use netcdf;
 use tokio::fs;
 use std::collections::HashMap;
@@ -40,12 +44,54 @@ struct DownloadReponse {
 //  export PKG_CONFIG_PATH=/usr/src/eccodes/lib/pkgconfig
 //  export LD_LIBRARY_PATH=/usr/src/eccodes/lib
 
+pub async fn download_and_parse (file_data: MessageData) -> () {
+
+    let file_path = format!("/home/stef/rust/knmi-rs/download/{}", file_data.filename);
+    let download_data =  match download_url(&file_data.url, &CONFIG.knmi.open_data_api_token).await {
+        Ok(data) => data,
+        Err(err) => {
+          error!("{err}");
+          return
+        }
+    };
+
+    info!("Downloading {}...", file_data.url);
+
+    match download_file(&download_data.temporary_download_url, &file_path).await {
+        Ok(_) => (),
+        Err(err) => {
+            error!("{err}");
+            return
+        }
+    }
+
+    match unpack(&file_path).await {
+        Ok(_) => (),
+        Err(err) => {
+            error!("{err}");
+            return
+        }
+    }
+
+    match parse_grib(&file_data.filename.replace(".tar", "")).await {
+        Ok(_) => (),
+        Err(err) => {
+            error!("{err}");
+            return
+        }
+    }
+}
+
+pub async fn download_latest () -> () {
+
+}
+
 pub async fn download () -> Response {
 
-    let token = "";
-    let path = "harm40_v1_p1_2024032806.tar";
-    let url = format!("https://api.dataplatform.knmi.nl/open-data/v1/datasets/harmonie_arome_cy40_p1/versions/0.2/files/{}/url", path);
-    let file_path = format!("/home/stef/rust/knmi-rs/download/{}", path);
+    // let token = "";
+    // let path = "harm40_v1_p1_2024032806.tar";
+    // let url = format!("https://api.dataplatform.knmi.nl/open-data/v1/datasets/harmonie_arome_cy40_p1/versions/0.2/files/{}/url", path);
+    // let file_path = format!("/home/stef/rust/knmi-rs/download/{}", path);
 
     // let download_data =  match download_url(&url, token).await {
     //     Ok(data) => data,
@@ -77,13 +123,13 @@ pub async fn download () -> Response {
     // }
 
     // match read_nc().await {
-    match parse_grib().await {
-        Ok(_) => (),
-        Err(err) => {
-            println!("{:?}", err);
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read grib").into_response();
-        }
-    }
+    // match parse_grib().await {
+    //     Ok(_) => (),
+    //     Err(err) => {
+    //         println!("{:?}", err);
+    //         return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read grib").into_response();
+    //     }
+    // }
 
     (StatusCode::OK, "File downloaded successfully.").into_response()
     
@@ -95,7 +141,7 @@ async fn read_nc () -> Result<()> {
 	let peak_mem = PEAK_ALLOC.peak_usage_as_gb();
 	println!("The max amount that was used {}", peak_mem);
 
-    let nc_file = netcdf::open("./download/nc/test.nc")?;
+    let nc_file = netcdf::open("./download/nc/arome.nc")?;
 
     let var_surface_global_radiation = &nc_file.variable("surface_global_radiation").unwrap();
     let mut surface_global_radiation = Array3::<f64>::zeros((48, 300, 300));
@@ -135,11 +181,11 @@ async fn read_nc () -> Result<()> {
     Ok(())
 }
 
-async fn parse_grib () -> Result<()> {
+async fn parse_grib (path: &str) -> Result<()> {
 
-    let path = "./download/harm40_v1_p1_2024032806";
-    let mut nc_file = netcdf::create("./download/nc/test.nc")?;
-    let files = list_dir(path).await?;
+    // let path = "./download/harm40_v1_p1_2024032806";
+    let mut nc_file = netcdf::create("./download/nc/arome.nc")?;
+    let files = list_dir(&format!("./download/{path}")).await?;
     let mut field_map = HashMap::<String, Array3<f64>>::new();
     let mut latitudes: Vec<f64> = vec![];
     let mut longitudes: Vec<f64> = vec![];
@@ -189,7 +235,7 @@ async fn parse_grib () -> Result<()> {
             let array2 = msg.to_ndarray()?;
 
             if field_map.contains_key(&field_name) {
-                let mut array3 = field_map.get_mut(&field_name).unwrap();
+                let array3 = field_map.get_mut(&field_name).unwrap();
                 array3.push(Axis(0), ArrayView::from(&array2)).unwrap();
             } else {
                 let mut array3 = Array3::<f64>::default((0, 300, 300));
@@ -327,314 +373,312 @@ fn filename_to_dates (filename: &str) -> Result<(DateTime<Utc>, DateTime<Utc>)> 
     Ok((date, prediction_date))
 }
 
-async fn read_grib () -> Result<()> {
+// async fn read_grib () -> Result<()> {
 
-    let filename = "HA40_N25_202403280600_00100_GB";
-    let path = format!("/home/stef/rust/knmi-rs/download/harm40_v1_p1_2024032806/{filename}");
-    let file_path = Path::new(&path);
+//     let filename = "HA40_N25_202403280600_00100_GB";
+//     let path = format!("/home/stef/rust/knmi-rs/download/harm40_v1_p1_2024032806/{filename}");
+//     let file_path = Path::new(&path);
 
-    let product_kind = ProductKind::GRIB;
-    let mut handle = CodesHandle::new_from_file(file_path, product_kind)?;
+//     let product_kind = ProductKind::GRIB;
+//     let mut handle = CodesHandle::new_from_file(file_path, product_kind)?;
 
-    // for (key, val) in arome::VAR_MAP.iter() {
-    //     println!("{:?}", val);
-    // }
+//     // for (key, val) in arome::VAR_MAP.iter() {
+//     //     println!("{:?}", val);
+//     // }
 
-    let year = filename[9..13].parse::<i32>()?;
-    let month = filename[13..15].parse::<u32>()?;
-    let day = filename[15..17].parse::<u32>()?;
-    let hour = filename[17..19].parse::<u32>()?;
-    let prediction_hour = filename[22..25].parse::<i64>()?;
-    let date = Utc.with_ymd_and_hms(year, month, day, hour, 0, 0).unwrap();
-    let prediction_date = Utc.timestamp_millis_opt(date.timestamp_millis() + (prediction_hour * 3600 * 1000)).unwrap();
+//     let year = filename[9..13].parse::<i32>()?;
+//     let month = filename[13..15].parse::<u32>()?;
+//     let day = filename[15..17].parse::<u32>()?;
+//     let hour = filename[17..19].parse::<u32>()?;
+//     let prediction_hour = filename[22..25].parse::<i64>()?;
+//     let date = Utc.with_ymd_and_hms(year, month, day, hour, 0, 0).unwrap();
+//     let prediction_date = Utc.timestamp_millis_opt(date.timestamp_millis() + (prediction_hour * 3600 * 1000)).unwrap();
 
-    println!("year: {year}");
-    println!("month: {month}");
-    println!("day: {day}");
-    println!("hour: {hour}");
-    println!("prediction_hour: {prediction_hour}");
-    println!("date: {date}");
-    println!("prediction_date: {prediction_date}");
+//     println!("year: {year}");
+//     println!("month: {month}");
+//     println!("day: {day}");
+//     println!("hour: {hour}");
+//     println!("prediction_hour: {prediction_hour}");
+//     println!("date: {date}");
+//     println!("prediction_date: {prediction_date}");
 
-    let mut field_name;
-    let mut message_dataset = DataFrame::new(vec![]);
+//     let mut field_name;
+//     let mut message_dataset = DataFrame::new(vec![]);
 
-    let mut lat: usize = 0;
-    let mut lon: usize = 0;
-    let mut array_2 = Array3::<f64>::default((0, 300, 300));
+//     let mut lat: usize = 0;
+//     let mut lon: usize = 0;
+//     let mut array_2 = Array3::<f64>::default((0, 300, 300));
 
-    while let Some(msg) = handle.next()? {
+//     while let Some(msg) = handle.next()? {
 
-        if msg.read_key("gridType")?.value != KeyType::Str("regular_ll".to_string()) {
-            continue;
-        }
+//         if msg.read_key("gridType")?.value != KeyType::Str("regular_ll".to_string()) {
+//             continue;
+//         }
 
-        let parameter_name = msg.read_key("parameterName")?.value;
-        field_name = match arome::VAR_LIST.into_iter().find(|v|  KeyType::Str(v.0.to_string()) == parameter_name) {
-            Some((key, value)) => {
+//         let parameter_name = msg.read_key("parameterName")?.value;
+//         field_name = match arome::VAR_LIST.into_iter().find(|v|  KeyType::Str(v.0.to_string()) == parameter_name) {
+//             Some((key, value)) => {
 
-                let name;
+//                 let name;
 
-                if value.starts_with("_") {
-                    let step_type = format!("{:?}", msg.read_key("stepType")?.value);
-                    name = format!("{}{}", step_type.replace("Str(\"", "").replace("\")", ""), value);
-                } else {
-                    name = value.to_string()
-                }
+//                 if value.starts_with("_") {
+//                     let step_type = format!("{:?}", msg.read_key("stepType")?.value);
+//                     name = format!("{}{}", step_type.replace("Str(\"", "").replace("\")", ""), value);
+//                 } else {
+//                     name = value.to_string()
+//                 }
                 
-                name
-            },
-            None => format!("unknown_code_{}", format!("{:?}", parameter_name).replace("Str(\"", "").replace("\")", "")),
-        };
+//                 name
+//             },
+//             None => format!("unknown_code_{}", format!("{:?}", parameter_name).replace("Str(\"", "").replace("\")", "")),
+//         };
 
 
-        // println!("level: {:?}", msg.read_key("level")?.value);
-        // println!("typeOfLevel: {:?}", msg.read_key("typeOfLevel")?.value);
+//         // println!("level: {:?}", msg.read_key("level")?.value);
+//         // println!("typeOfLevel: {:?}", msg.read_key("typeOfLevel")?.value);
         
-        if msg.read_key("level")?.value == KeyType::Int(0) && msg.read_key("typeOfLevel")?.value == KeyType::Str("heightAboveGround".to_string()) {
-            field_name = format!("surface_{field_name}");
-        } else {
-            let level = format!("{:?}", msg.read_key("level")?.value).replace("Int(", "").replace(")", "");
-            // let type_of_level = format!("{:?}", msg.read_key("typeOfLevel")?.value).replace("Str(\"", "").replace("\")", "");
-            field_name = format!("{level}m_above_ground_{field_name}");
-        }
+//         if msg.read_key("level")?.value == KeyType::Int(0) && msg.read_key("typeOfLevel")?.value == KeyType::Str("heightAboveGround".to_string()) {
+//             field_name = format!("surface_{field_name}");
+//         } else {
+//             let level = format!("{:?}", msg.read_key("level")?.value).replace("Int(", "").replace(")", "");
+//             // let type_of_level = format!("{:?}", msg.read_key("typeOfLevel")?.value).replace("Str(\"", "").replace("\")", "");
+//             field_name = format!("{level}m_above_ground_{field_name}");
+//         }
 
-        println!("field_name: {:?}", field_name);
+//         println!("field_name: {:?}", field_name);
 
-        // if !arome::VAR_MAP.contains_key(arome::Wrapper(msg.read_key("parameterName")?.value)) {
-        //     continue;
-        // }
-        // if msg.read_key("parameterName")?.value !
+//         // if !arome::VAR_MAP.contains_key(arome::Wrapper(msg.read_key("parameterName")?.value)) {
+//         //     continue;
+//         // }
+//         // if msg.read_key("parameterName")?.value !
 
-        let min_lat = format!("{:?}", msg.read_key("latitudeOfFirstGridPointInDegrees")?.value).replace("Float(", "").replace(")", "").parse::<f32>()?;
-        let max_lat = format!("{:?}", msg.read_key("latitudeOfLastGridPointInDegrees")?.value).replace("Float(", "").replace(")", "").parse::<f32>()?;
+//         let min_lat = format!("{:?}", msg.read_key("latitudeOfFirstGridPointInDegrees")?.value).replace("Float(", "").replace(")", "").parse::<f32>()?;
+//         let max_lat = format!("{:?}", msg.read_key("latitudeOfLastGridPointInDegrees")?.value).replace("Float(", "").replace(")", "").parse::<f32>()?;
         
-        let min_lon = format!("{:?}", msg.read_key("longitudeOfFirstGridPointInDegrees")?.value).replace("Float(", "").replace(")", "").parse::<f32>()?;
-        let max_lon = format!("{:?}", msg.read_key("longitudeOfLastGridPointInDegrees")?.value).replace("Float(", "").replace(")", "").parse::<f32>()?;
+//         let min_lon = format!("{:?}", msg.read_key("longitudeOfFirstGridPointInDegrees")?.value).replace("Float(", "").replace(")", "").parse::<f32>()?;
+//         let max_lon = format!("{:?}", msg.read_key("longitudeOfLastGridPointInDegrees")?.value).replace("Float(", "").replace(")", "").parse::<f32>()?;
         
-        let step_lat = format!("{:?}", msg.read_key("jDirectionIncrement")?.value).replace("Int(", "").replace(")", "").parse::<u32>()?;
-        let step_lon = format!("{:?}", msg.read_key("iDirectionIncrement")?.value).replace("Int(", "").replace(")", "").parse::<u32>()?;
+//         let step_lat = format!("{:?}", msg.read_key("jDirectionIncrement")?.value).replace("Int(", "").replace(")", "").parse::<u32>()?;
+//         let step_lon = format!("{:?}", msg.read_key("iDirectionIncrement")?.value).replace("Int(", "").replace(")", "").parse::<u32>()?;
        
-        // println!("min_lat: {min_lat}");
-        // println!("max_lat: {max_lat}");
-        // println!("min_lon: {min_lon}");
-        // println!("max_lon: {max_lon}");
-        // println!("step_lat: {step_lat}");
-        // println!("step_lon: {step_lon}");
+//         // println!("min_lat: {min_lat}");
+//         // println!("max_lat: {max_lat}");
+//         // println!("min_lon: {min_lon}");
+//         // println!("max_lon: {max_lon}");
+//         // println!("step_lat: {step_lat}");
+//         // println!("step_lon: {step_lon}");
 
-        let latitudes = seq(
-            min_lat * 1_000.0,
-            max_lat * 1_000.0,
-            step_lat,
-        ).fmap(|v| v / 1_000.0);
+//         let latitudes = seq(
+//             min_lat * 1_000.0,
+//             max_lat * 1_000.0,
+//             step_lat,
+//         ).fmap(|v| v / 1_000.0);
 
-        let longitudes = seq(
-            min_lon * 1_000.0,
-            max_lon * 1_000.0,
-            step_lon,
-        ).fmap(|v| v / 1_000.0);
+//         let longitudes = seq(
+//             min_lon * 1_000.0,
+//             max_lon * 1_000.0,
+//             step_lon,
+//         ).fmap(|v| v / 1_000.0);
 
-        // println!("latitudes len: {:?}", latitudes.len());
-        // println!("longitudes len: {:?}", longitudes.len());
-        // println!("expected len: {:?}", latitudes.len() * longitudes.len());
-        // println!("real latitudes len: {:?}", msg.to_lons_lats_values()?.latitudes.len());
-        // println!("real longitudes len: {:?}", msg.to_lons_lats_values()?.longitudes.len());
-        // println!("real values len: {:?}", msg.to_lons_lats_values()?);
+//         // println!("latitudes len: {:?}", latitudes.len());
+//         // println!("longitudes len: {:?}", longitudes.len());
+//         // println!("expected len: {:?}", latitudes.len() * longitudes.len());
+//         // println!("real latitudes len: {:?}", msg.to_lons_lats_values()?.latitudes.len());
+//         // println!("real longitudes len: {:?}", msg.to_lons_lats_values()?.longitudes.len());
+//         // println!("real values len: {:?}", msg.to_lons_lats_values()?);
         
-        let array = msg.to_ndarray()?;
-        println!("ndarray cols: {}", array.ncols());
-        println!("ndarray rows: {}", array.nrows());
-        // println!("{:?}", msg.to_lons_lats_values());
+//         let array = msg.to_ndarray()?;
+//         println!("ndarray cols: {}", array.ncols());
+//         println!("ndarray rows: {}", array.nrows());
+//         // println!("{:?}", msg.to_lons_lats_values());
 
-        lat = latitudes.iter().position(|&l| l == 52.036).unwrap();
-        lon = longitudes.iter().position(|&l| l == 5.661).unwrap();
+//         lat = latitudes.iter().position(|&l| l == 52.036).unwrap();
+//         lon = longitudes.iter().position(|&l| l == 5.661).unwrap();
 
-        println!("latitude index: {:?}", lat);
-        println!("longitude index: {:?}", lon);
-        println!("ndarray ({}, {}): {:?}", lat, lon, array.get((lat, lon)));
-        println!("ndmi: {:?}", array.ndim());
+//         println!("latitude index: {:?}", lat);
+//         println!("longitude index: {:?}", lon);
+//         println!("ndarray ({}, {}): {:?}", lat, lon, array.get((lat, lon)));
+//         println!("ndmi: {:?}", array.ndim());
         
-        if msg.read_key("parameterName")?.value == KeyType::Str("117".to_string()) {
+//         if msg.read_key("parameterName")?.value == KeyType::Str("117".to_string()) {
 
-            array_2.push(Axis(0), ArrayView::from(&array)).unwrap();
-            array_2.push(Axis(0), ArrayView::from(&array)).unwrap();
-            println!("{:?}", array_2);
-            message_dataset.push(&field_name, Series::new(array_2.clone().into_raw_vec()));
+//             array_2.push(Axis(0), ArrayView::from(&array)).unwrap();
+//             array_2.push(Axis(0), ArrayView::from(&array)).unwrap();
+//             println!("{:?}", array_2);
+//             message_dataset.push(&field_name, Series::new(array_2.clone().into_raw_vec()));
             
-            // let mut a3 = Array3::default(shape)
+//             // let mut a3 = Array3::default(shape)
 
-            // println!("{:?}",);
+//             // println!("{:?}",);
             
-            // println!("{:?}", msg.read_key("typeOfLevel")?.value);
-            // println!("{:?}", msg.read_key("level")?.value);
-            // println!("{:?}", msg.read_key("parameterName")?.value);
-            // println!("{:?}", msg.read_key("stepType")?.value);
-            // println!("{:?}", msg.read_key("gridType")?.value);
+//             // println!("{:?}", msg.read_key("typeOfLevel")?.value);
+//             // println!("{:?}", msg.read_key("level")?.value);
+//             // println!("{:?}", msg.read_key("parameterName")?.value);
+//             // println!("{:?}", msg.read_key("stepType")?.value);
+//             // println!("{:?}", msg.read_key("gridType")?.value);
             
-            // let nearest_gridpoints = msg
-            //     .codes_nearest()?
-            //     .find_nearest(52.0402, 5.6649)?;
+//             // let nearest_gridpoints = msg
+//             //     .codes_nearest()?
+//             //     .find_nearest(52.0402, 5.6649)?;
             
-            // println!("{:?}", nearest_gridpoints);
+//             // println!("{:?}", nearest_gridpoints);
             
-            // println!("value: {}, distance: {}",
-            //     nearest_gridpoints[3].value,
-            //     nearest_gridpoints[3].distance);
-        } else {
-            message_dataset.push(&field_name, Series::new(array.into_raw_vec()));
-        }
+//             // println!("value: {}, distance: {}",
+//             //     nearest_gridpoints[3].value,
+//             //     nearest_gridpoints[3].distance);
+//         } else {
+//             message_dataset.push(&field_name, Series::new(array.into_raw_vec()));
+//         }
         
 
-        // let array = msg.to_ndarray()?;
+//         // let array = msg.to_ndarray()?;
 
-        // println!("{:?}", array);
+//         // println!("{:?}", array);
 
-        // let flags = [
-        //     KeysIteratorFlags::AllKeys
-        // ];
+//         // let flags = [
+//         //     KeysIteratorFlags::AllKeys
+//         // ];
         
-        // let namespace = "parameterName";
-        // let mut key_iter = msg.new_keys_iterator(&flags, namespace)?;
+//         // let namespace = "parameterName";
+//         // let mut key_iter = msg.new_keys_iterator(&flags, namespace)?;
 
-        // while let Some(key) = key_iter.next()? {
-        //     println!("{:?}", key)
-        // }
+//         // while let Some(key) = key_iter.next()? {
+//         //     println!("{:?}", key)
+//         // }
 
-        // let flags = [
-        //     KeysIteratorFlags::AllKeys,
-        //     KeysIteratorFlags::SkipOptional,
-        //     KeysIteratorFlags::SkipReadOnly,
-        //     KeysIteratorFlags::SkipDuplicates,
-        // ];
+//         // let flags = [
+//         //     KeysIteratorFlags::AllKeys,
+//         //     KeysIteratorFlags::SkipOptional,
+//         //     KeysIteratorFlags::SkipReadOnly,
+//         //     KeysIteratorFlags::SkipDuplicates,
+//         // ];
  
-        // let mut key_iter = msg.new_keys_iterator(&flags, "paramterName")?;
-        // // println!("{:?}", msg.new_keys_iterator(&flags, "parameterName"));
+//         // let mut key_iter = msg.new_keys_iterator(&flags, "paramterName")?;
+//         // // println!("{:?}", msg.new_keys_iterator(&flags, "parameterName"));
 
-        // while Some(key) = key_iter.next()? {
-        //     println!("{:?}", key);
-        // }
+//         // while Some(key) = key_iter.next()? {
+//         //     println!("{:?}", key);
+//         // }
 
-        // let key = msg.read_key("typeOfLevel")?;
+//         // let key = msg.read_key("typeOfLevel")?;
 
-        // println!("{:?}", key);
+//         // println!("{:?}", key);
 
-        // let nearest_gridpoints = msg
-        //     .codes_nearest()?
-        //     .find_nearest(52.0402, 5.6649)?;
+//         // let nearest_gridpoints = msg
+//         //     .codes_nearest()?
+//         //     .find_nearest(52.0402, 5.6649)?;
 
-        // Print value and distance of the nearest gridpoint
-        // println!("{:?}", nearest_gridpoints[0]);
-        // println!("value: {}, distance: {}",
-        //     nearest_gridpoints[3].value,
-        //     nearest_gridpoints[3].distance);
+//         // Print value and distance of the nearest gridpoint
+//         // println!("{:?}", nearest_gridpoints[0]);
+//         // println!("value: {}, distance: {}",
+//         //     nearest_gridpoints[3].value,
+//         //     nearest_gridpoints[3].distance);
 
-        // if msg.read_key("shortName")?.value == KeyType::Str("GR".to_string())
-        //     && msg.read_key("typeOfLevel")?.value == KeyType::Str("surface".to_string()) {
+//         // if msg.read_key("shortName")?.value == KeyType::Str("GR".to_string())
+//         //     && msg.read_key("typeOfLevel")?.value == KeyType::Str("surface".to_string()) {
             
-        //     let nearest_gridpoints = msg.codes_nearest()?
-        //         // Find the nearest gridpoints to Reykjavik
-        //         .find_nearest(52.0402, 5.6649)?;
+//         //     let nearest_gridpoints = msg.codes_nearest()?
+//         //         // Find the nearest gridpoints to Reykjavik
+//         //         .find_nearest(52.0402, 5.6649)?;
     
-        //     // Print value and distance of the nearest gridpoint
-        //     println!("value: {}, distance: {}",
-        //         nearest_gridpoints[3].value,
-        //         nearest_gridpoints[3].distance);
-        // }
-        // if msg.read_key("shortName")?.value == KeyType::Str("GR".to_string())
-        //     && msg.read_key("typeOfLevel")?.value == KeyType::Str("surface".to_string()) {
+//         //     // Print value and distance of the nearest gridpoint
+//         //     println!("value: {}, distance: {}",
+//         //         nearest_gridpoints[3].value,
+//         //         nearest_gridpoints[3].distance);
+//         // }
+//         // if msg.read_key("shortName")?.value == KeyType::Str("GR".to_string())
+//         //     && msg.read_key("typeOfLevel")?.value == KeyType::Str("surface".to_string()) {
             
-        //     let nearest_gridpoints = msg.codes_nearest()?
-        //         // Find the nearest gridpoints to Reykjavik
-        //         .find_nearest(52.0402, 5.6649)?;
+//         //     let nearest_gridpoints = msg.codes_nearest()?
+//         //         // Find the nearest gridpoints to Reykjavik
+//         //         .find_nearest(52.0402, 5.6649)?;
     
-        //     // Print value and distance of the nearest gridpoint
-        //     println!("value: {}, distance: {}",
-        //         nearest_gridpoints[3].value,
-        //         nearest_gridpoints[3].distance);
-        // }
-    }
+//         //     // Print value and distance of the nearest gridpoint
+//         //     println!("value: {}, distance: {}",
+//         //         nearest_gridpoints[3].value,
+//         //         nearest_gridpoints[3].distance);
+//         // }
+//     }
 
-    // println!("{:?}", message_dataset["surface_global_radiation"].len());
+//     // println!("{:?}", message_dataset["surface_global_radiation"].len());
 
-    // let mut test_data = ndarray::Array2::<f64>::zeros((0, 0));
+//     // let mut test_data = ndarray::Array2::<f64>::zeros((0, 0));
 
-    // println!("{:?}", message_dataset.header());
+//     // println!("{:?}", message_dataset.header());
 
-    // let empty = match message_dataset.write_nc(&format!("/home/stef/rust/knmi-rs/download/nc/{filename}.nc").to_string()) {
-    //     _ => ""
-    // };
+//     // let empty = match message_dataset.write_nc(&format!("/home/stef/rust/knmi-rs/download/nc/{filename}.nc").to_string()) {
+//     //     _ => ""
+//     // };
 
-    let file = netcdf::open(&format!("/home/stef/rust/knmi-rs/download/nc/{filename}.nc").to_string())?;
-    let global_radiation = &file.variable("surface_global_radiation").expect("");
+//     let file = netcdf::open(&format!("/home/stef/rust/knmi-rs/download/nc/{filename}.nc").to_string())?;
+//     let global_radiation = &file.variable("surface_global_radiation").expect("");
 
-    let mut data = ndarray::Array1::<f64>::zeros((90000 * 2));
-    global_radiation.get_into((..), data.view_mut()).unwrap();
-    let mut shaped_data = data.into_shape((2, 300, 300)).unwrap();
+//     let mut data = ndarray::Array1::<f64>::zeros((90000 * 2));
+//     global_radiation.get_into((..), data.view_mut()).unwrap();
+//     let mut shaped_data = data.into_shape((2, 300, 300)).unwrap();
 
-    println!("{:?}", shaped_data);
+//     println!("{:?}", shaped_data);
     
-    println!("{:?}", shaped_data.get((0, lat, lon)));
-    println!("{:?}", shaped_data.get((1, lat, lon)));
+//     println!("{:?}", shaped_data.get((0, lat, lon)));
+//     println!("{:?}", shaped_data.get((1, lat, lon)));
 
-    // let file =  File::open(path).await?;
-    // let buffer = BufReader::new(file);
-    // let mut reader = Grib1Reader::new(buffer);
+//     // let file =  File::open(path).await?;
+//     // let buffer = BufReader::new(file);
+//     // let mut reader = Grib1Reader::new(buffer);
 
-    // let result = reader.read_index().await?;
+//     // let result = reader.read_index().await?;
 
-    // for r in result {
-    //     println!("{:?}", r);
-    // }
+//     // for r in result {
+//     //     println!("{:?}", r);
+//     // }
 
-    // let result = reader.read(vec![SearchParams { param: 117, level: 0 }]).await?;
+//     // let result = reader.read(vec![SearchParams { param: 117, level: 0 }]).await?;
 
-    // println!("Results: {}", result.len());
-    // for grib in result {
-    //     println!("{:#?}", &grib.pds);
-    //     if let Some(gds) = grib.gds {
-    //         println!("{:#?}", &gds);
-    //         println!("{:#?}", &gds.data_representation_type);
-    //         println!("{:#?}", &gds.number_of_vertical_coordinate_values);
-    //         println!("{:#?}", &gds.pvl_location);
-    //     }
+//     // println!("Results: {}", result.len());
+//     // for grib in result {
+//     //     println!("{:#?}", &grib.pds);
+//     //     if let Some(gds) = grib.gds {
+//     //         println!("{:#?}", &gds);
+//     //         println!("{:#?}", &gds.data_representation_type);
+//     //         println!("{:#?}", &gds.number_of_vertical_coordinate_values);
+//     //         println!("{:#?}", &gds.pvl_location);
+//     //     }
 
-    //     grib.bds
-    // }
+//     //     grib.bds
+//     // }
     
-    // let grib2 = grib::from_reader(buffer)?;
+//     // let grib2 = grib::from_reader(buffer)?;
 
     
-    // for (_index, submessage) in grib2.iter() {
-    //     let discipline = submessage.indicator().discipline;
-    //     // Parameter category and number are included in the product definition section.
-    //     // They are wrapped by `Option` because some GRIB2 data may not contain such
-    //     // information.
-    //     let category = submessage.prod_def().parameter_category().unwrap();
-    //     let parameter = submessage.prod_def().parameter_number().unwrap();
+//     // for (_index, submessage) in grib2.iter() {
+//     //     let discipline = submessage.indicator().discipline;
+//     //     // Parameter category and number are included in the product definition section.
+//     //     // They are wrapped by `Option` because some GRIB2 data may not contain such
+//     //     // information.
+//     //     let category = submessage.prod_def().parameter_category().unwrap();
+//     //     let parameter = submessage.prod_def().parameter_number().unwrap();
 
-    //     // When using the `lookup()` function, `use grib::codetables::Lookup;` is
-    //     // necessary.
-    //     let parameter = CodeTable4_2::new(discipline, category).lookup(usize::from(parameter));
+//     //     // When using the `lookup()` function, `use grib::codetables::Lookup;` is
+//     //     // necessary.
+//     //     let parameter = CodeTable4_2::new(discipline, category).lookup(usize::from(parameter));
 
-    //     // `forecast_time()` returns `ForecastTime` wrapped by `Option`.
-    //     let forecast_time = submessage.prod_def().forecast_time().unwrap();
+//     //     // `forecast_time()` returns `ForecastTime` wrapped by `Option`.
+//     //     let forecast_time = submessage.prod_def().forecast_time().unwrap();
 
-    //     // `fixed_layers()` returns a tuple of two layers wrapped by `Option`.
-    //     let (first, _second) = submessage.prod_def().fixed_surfaces().unwrap();
-    //     let elevation_level = first.value();
+//     //     // `fixed_layers()` returns a tuple of two layers wrapped by `Option`.
+//     //     let (first, _second) = submessage.prod_def().fixed_surfaces().unwrap();
+//     //     let elevation_level = first.value();
 
-    //     println!(
-    //         "{:<31} {:>14} {:>17}",
-    //         parameter.to_string(),
-    //         forecast_time,
-    //         elevation_level
-    //     );
-    // }
+//     //     println!(
+//     //         "{:<31} {:>14} {:>17}",
+//     //         parameter.to_string(),
+//     //         forecast_time,
+//     //         elevation_level
+//     //     );
+//     // }
 
-    Ok(())
-}
-
-
+//     Ok(())
+// }
 
 async fn unpack (path: &str) -> Result<()> {
 
