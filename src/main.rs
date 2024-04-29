@@ -31,21 +31,13 @@ async fn main() {
     let subscriber = tracing_subscriber::FmtSubscriber::new();
     tracing::subscriber::set_global_default(subscriber).unwrap(); 
 
+    let arome = knmi::models::arome::Arome::new().await;
+
     let state = AppState {
-        // config: config::load_config(),
-        arome: knmi::models::arome::Arome::new(),
+        arome,
     };
 
     let port = config::CONFIG.server.port;
-
-    match knmi::files::list_latest_files().await {
-        Ok(f) => {
-            println!("{:?}", f);
-        },
-        Err(_) => {
-            error!("Failed to fetch latest files.");
-        }
-    };
 
     task::spawn(knmi::notifications::sub_knmi_notifications(state.clone()));
 

@@ -74,9 +74,11 @@ pub async fn sub_knmi_notifications (app_state: AppState) {
                 }
             };
 
-            println!("{:?}", message);
-
-            tokio::spawn(download_and_parse(message.data));
+            tokio::spawn(update_model(app_state.clone(), message));
         }
     }
+}
+
+async fn update_model (app_state: AppState, message: Message) {
+    app_state.arome.update_model(message.data).await;
 }

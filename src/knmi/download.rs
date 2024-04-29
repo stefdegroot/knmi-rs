@@ -44,42 +44,26 @@ struct DownloadReponse {
 //  export PKG_CONFIG_PATH=/usr/src/eccodes/lib/pkgconfig
 //  export LD_LIBRARY_PATH=/usr/src/eccodes/lib
 
-pub async fn download_and_parse (file_data: MessageData) -> () {
+pub async fn download_and_parse (file_data: MessageData) -> Result<String> {
 
     let file_path = format!("/home/stef/rust/knmi-rs/download/{}", file_data.filename);
-    let download_data =  match download_url(&file_data.url, &CONFIG.knmi.open_data_api_token).await {
-        Ok(data) => data,
-        Err(err) => {
-          error!("{err}");
-          return
-        }
-    };
+    let grib_dir = "/home/stef/rust/knmi-rs/download/grib";
 
-    info!("Downloading {}...", file_data.url);
-
-    match download_file(&download_data.temporary_download_url, &file_path).await {
-        Ok(_) => (),
-        Err(err) => {
-            error!("{err}");
-            return
-        }
+    if !Path::new(&file_path).exists() {
+        info!(file_data.filename, "File already exits, skipping download for:");
+        
+        let download_data = download_url(&file_data.url, &CONFIG.knmi.open_data_api_token).await?;
+    
+        info!("Downloading {}...", file_data.url);
+    
+        download_file(&download_data.temporary_download_url, &file_path).await?;
     }
 
-    match unpack(&file_path).await {
-        Ok(_) => (),
-        Err(err) => {
-            error!("{err}");
-            return
-        }
-    }
+    unpack(&file_path, &grib_dir).await?;
 
-    match parse_grib(&file_data.filename.replace(".tar", "")).await {
-        Ok(_) => (),
-        Err(err) => {
-            error!("{err}");
-            return
-        }
-    }
+    let date = parse_grib(&grib_dir).await?;
+
+    Ok(date)
 }
 
 pub async fn download_latest () -> () {
@@ -181,19 +165,23 @@ async fn read_nc () -> Result<()> {
     Ok(())
 }
 
-async fn parse_grib (path: &str) -> Result<()> {
+async fn parse_grib (path: &str) -> Result<String> {
 
     // let path = "./download/harm40_v1_p1_2024032806";
     let mut nc_file = netcdf::create("./download/nc/arome.nc")?;
-    let files = list_dir(&format!("./download/{path}")).await?;
+    // let files = list_dir(&format!("./download/grib")).await?;
+    let files = list_dir(&format!("./download/grib/tmp")).await?;
     let mut field_map = HashMap::<String, Array3<f64>>::new();
     let mut latitudes: Vec<f64> = vec![];
     let mut longitudes: Vec<f64> = vec![];
     let mut prediction_dates: Vec<i64> = vec![];
+    let mut latest_date = "".to_string();
 
     nc_file.add_unlimited_dimension("time")?;
-    nc_file.add_dimension("lat", 300)?;
-    nc_file.add_dimension("lon", 300)?;
+    // nc_file.add_dimension("lat", 300)?;
+    // nc_file.add_dimension("lon", 300)?;
+    nc_file.add_dimension("lat", 390)?;
+    nc_file.add_dimension("lon", 390)?;
     
     let mut i = 0;
 
@@ -206,10 +194,11 @@ async fn parse_grib (path: &str) -> Result<()> {
         
         let mut handle = CodesHandle::new_from_file(&file_path, ProductKind::GRIB)?;
         let (date, prediction_date) = filename_to_dates(&file_name)?;
-        
-        println!("filename: {:?} - {:?} - {:?}", file_name, date, prediction_date);
+        latest_date = date.to_string();
 
         prediction_dates.push(prediction_date.timestamp_millis());
+
+        let mut z = 0;
 
         while let Some(msg) = handle.next()? {
 
@@ -219,6 +208,8 @@ async fn parse_grib (path: &str) -> Result<()> {
 
             let parameter_name = read_grib_string(msg, "parameterName")?;
             let mut field_name = read_field_name(msg, &parameter_name)?;
+
+            // println!("{:?} - {:?} - {:?} - {:?}", parameter_name, field_name, read_grib_i64(msg, "level"), read_grib_string(msg, "typeOfLevel"));
 
             if read_grib_i64(msg, "level")? == 0 && read_grib_string(msg, "typeOfLevel")? == "heightAboveGround" {
                 field_name = format!("surface_{field_name}");
@@ -238,21 +229,40 @@ async fn parse_grib (path: &str) -> Result<()> {
                 let array3 = field_map.get_mut(&field_name).unwrap();
                 array3.push(Axis(0), ArrayView::from(&array2)).unwrap();
             } else {
-                let mut array3 = Array3::<f64>::default((0, 300, 300));
+
+                // let mut array3 = Array3::<f64>::default((0, 300, 300));
+                let mut array3 = Array3::<f64>::default((0, 390, 390));
                 array3.push(Axis(0), ArrayView::from(&array2)).unwrap();
                 field_map.insert(field_name, array3);
             }
+
+            z += 1;
         }
     }
 
     for (key, value) in field_map.into_iter() {
-        println!("saving {} to nc file", key);
+       
         let mut var = nc_file.add_variable::<f64>(&key, &["time", "lat", "lon"])?;
-        var.put((48.., .., ..), value.view())?;
+
+        if value.shape() != [53, 390, 390] {
+            continue;
+        }
+
+        // match var.put((48.., .., ..), value.view()) {
+        match var.put((53.., .., ..), value.view()) {
+            Ok(_) => {
+                info!("saving to nc file: {}", key);
+            },
+            Err(err) => {
+                println!("{:?}", err);
+                error!("failed to save key: {}", key)
+            }
+        }
     }
 
     let mut prediction_date_var = nc_file.add_variable::<i64>("prediction_date", &["time"])?;
-    prediction_date_var.put_values(&prediction_dates, 48..)?;
+    // prediction_date_var.put_values(&prediction_dates, 48..)?;
+    prediction_date_var.put_values(&prediction_dates, 53..)?;
 
     let mut latitudes_var = nc_file.add_variable::<f64>("latitudes", &["lat"])?;
     latitudes_var.put_values(&latitudes, ..)?;
@@ -262,7 +272,7 @@ async fn parse_grib (path: &str) -> Result<()> {
     
     println!("finished parsing grib files to nc");
     
-    Ok(())
+    Ok(latest_date)
 }
 
 fn build_coordinates_grid (msg: &KeyedMessage) -> Result<(Vec<f64>, Vec<f64>)> {
@@ -362,20 +372,30 @@ async fn list_dir (path: &str) -> Result<Vec<(PathBuf, String)>> {
 
 fn filename_to_dates (filename: &str) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
 
-    let year = filename[9..13].parse::<i32>()?;
-    let month = filename[13..15].parse::<u32>()?;
-    let day = filename[15..17].parse::<u32>()?;
-    let hour = filename[17..19].parse::<u32>()?;
-    let prediction_hour = filename[22..25].parse::<i64>()?;
+    println!("{}", filename);
+
+    let year = filename[2..6].parse::<i32>()?;
+    let month = filename[6..8].parse::<u32>()?;
+    let day = filename[8..10].parse::<u32>()?;
+    let hour = filename[10..12].parse::<u32>()?;
+    let prediction_hour = filename[13..16].parse::<i64>()?;
     let date = Utc.with_ymd_and_hms(year, month, day, hour, 0, 0).unwrap();
-    let prediction_date = Utc.timestamp_millis_opt(date.timestamp_millis() + (prediction_hour * 3600 * 1000)).unwrap();
+    let prediction_date = Utc.timestamp_millis_opt(date.timestamp_millis() + (prediction_hour * 3530 * 1000)).unwrap();
+
+    // let year = filename[9..13].parse::<i32>()?;
+    // let month = filename[13..15].parse::<u32>()?;
+    // let day = filename[15..17].parse::<u32>()?;
+    // let hour = filename[17..19].parse::<u32>()?;
+    // let prediction_hour = filename[22..25].parse::<i64>()?;
+    // let date = Utc.with_ymd_and_hms(year, month, day, hour, 0, 0).unwrap();
+    // let prediction_date = Utc.timestamp_millis_opt(date.timestamp_millis() + (prediction_hour * 3530 * 1000)).unwrap();
 
     Ok((date, prediction_date))
 }
 
 // async fn read_grib () -> Result<()> {
 
-//     let filename = "HA40_N25_202403280600_00100_GB";
+//     let filename = "HA40_N25_202403280530_00100_GB";
 //     let path = format!("/home/stef/rust/knmi-rs/download/harm40_v1_p1_2024032806/{filename}");
 //     let file_path = Path::new(&path);
 
@@ -392,7 +412,7 @@ fn filename_to_dates (filename: &str) -> Result<(DateTime<Utc>, DateTime<Utc>)> 
 //     let hour = filename[17..19].parse::<u32>()?;
 //     let prediction_hour = filename[22..25].parse::<i64>()?;
 //     let date = Utc.with_ymd_and_hms(year, month, day, hour, 0, 0).unwrap();
-//     let prediction_date = Utc.timestamp_millis_opt(date.timestamp_millis() + (prediction_hour * 3600 * 1000)).unwrap();
+//     let prediction_date = Utc.timestamp_millis_opt(date.timestamp_millis() + (prediction_hour * 3530 * 1000)).unwrap();
 
 //     println!("year: {year}");
 //     println!("month: {month}");
@@ -680,18 +700,12 @@ fn filename_to_dates (filename: &str) -> Result<(DateTime<Utc>, DateTime<Utc>)> 
 //     Ok(())
 // }
 
-async fn unpack (path: &str) -> Result<()> {
+async fn unpack (path: &str, dest: &str) -> Result<()> {
 
     let tar =  File::open(path).await?;
     let mut archive = Archive::new(tar);
-    // let mut entries = archive.entries().unwrap();
 
-    // while let Some(file) = entries.next().await {
-    //     let f = file.unwrap();
-    //     println!("{}", f.path().unwrap().display());
-    // };
-
-    archive.unpack(path.replace(".tar", "")).await?;
+    archive.unpack(dest).await?;
 
     Ok(())
 }
