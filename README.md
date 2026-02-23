@@ -14,9 +14,24 @@ The server requires a toml config file in the root folder with the following pro
 port = 3000
 
 [knmi]
-open_data_api_token  = ""
-notification_service_token  = ""
+sources = [
+    "ForecastNetherlands",
+    "ForecastEurope",
+    "RealTimeObservations",
+]
+
+[knmi.open_data_api]
+token = ""
+
+[knmi.notification_service]
+url = "mqtt.dataplatform.knmi.nl"
+port = 433
+token = ""
 ```
+
+KNMI data sources can be indiviually enabled to load only the weather data you require.
+
+To obtain access to the KNMI data platform, you can register an account in the [KNMI Developer Portal](https://developer.dataplatform.knmi.nl/register/).
 
 # Models
 

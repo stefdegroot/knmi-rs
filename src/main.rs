@@ -2,12 +2,9 @@ use tokio::{task, signal};
 use tokio::net::TcpListener;
 use listenfd::ListenFd;
 use axum::{
-    response::Html,
     routing::get,
     Router,
 };
-use tracing_subscriber::prelude::*;
-use tracing::{error};
 
 mod knmi;
 mod config;
@@ -21,13 +18,6 @@ pub struct AppState {
 #[tokio::main]
 async fn main() {
 
-    // construct a subscriber that prints formatted traces to stdout
-    // let console_layer = console_subscriber::spawn();
-    // tracing_subscriber::registry()
-    //     .with(console_layer)
-    //     .with(tracing_subscriber::fmt::layer().with_filter(tracing_subscriber::filter::LevelFilter::INFO))
-    //     .init();
-    // use that subscriber to process traces emitted after this point
     let subscriber = tracing_subscriber::FmtSubscriber::new();
     tracing::subscriber::set_global_default(subscriber).unwrap(); 
 
@@ -42,8 +32,6 @@ async fn main() {
     task::spawn(knmi::notifications::sub_knmi_notifications(state.clone()));
 
     let app = Router::new()
-        .route("/", get(handler))
-        // .route("/list", get(knmi::files::pull_with_reqwest))
         .route("/download", get(knmi::download::download))
         .route("/weather/knmi-arome", get(knmi::arome::forecast))
         .with_state(state);
@@ -57,18 +45,12 @@ async fn main() {
         None => TcpListener::bind(format!("127.0.0.1:{}", port)).await.unwrap(),
     };
 
-    // let listener = TcpListener::bind("0.0.0.0:3000").await.unwrap();
-
-    println!("listening on http://{}", listener.local_addr().unwrap());
+    tracing::info!("listening on http://{}", listener.local_addr().unwrap());
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
         .unwrap();
-}
-
-async fn handler() -> Html<&'static str> {
-    Html("<h1>Hello, World!</h1>")
 }
 
 async fn shutdown_signal() {

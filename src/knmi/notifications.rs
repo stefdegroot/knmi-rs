@@ -1,14 +1,17 @@
 use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS, Transport };
-use tokio::{task};
 use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use tracing::error;
 use crate::{
     AppState,
-    knmi::download::download_and_parse,
+    knmi::sources::get_source,
     config::CONFIG,
 };
+
+pub enum MessageEvent {
+    Created,
+    Updated,
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -34,51 +37,83 @@ pub struct Message {
 
 pub async fn sub_knmi_notifications (app_state: AppState) {
 
-    let mqtt_url: &str = "wss://mqtt.dataplatform.knmi.nl:443";
-    let mqtt_client_id: String = Uuid::new_v4().to_string();
-    let mut mqtt_options = MqttOptions::new(&mqtt_client_id, mqtt_url, 443);
+    let id = Uuid::new_v4().to_string();
+    let host = format!("wss://{}", CONFIG.knmi.notification_service.url);
+    let port = CONFIG.knmi.notification_service.port;
+
+    let mut mqtt_options = MqttOptions::new(id, host, port);
     mqtt_options.set_transport(Transport::wss_with_default_config());
     mqtt_options.set_keep_alive(Duration::from_secs(60));
-    mqtt_options.set_credentials("token",  &CONFIG.knmi.notification_service_token);
+    mqtt_options.set_credentials("token",  &CONFIG.knmi.notification_service.token);
     mqtt_options.set_clean_session(false);
 
-    let (mut client, mut eventloop) = AsyncClient::new(mqtt_options, 10);
+    let (client, mut eventloop) = AsyncClient::new(mqtt_options, 10);
 
-    let dataset_name = "harmonie_arome_cy40_p1";
-    let dataset_version = "0.2";
-    // let dataset_name = "Actuele10mindataKNMIstations";
-    // let dataset_version = "2";
+    for source_tag in &CONFIG.knmi.sources {
 
-    client.subscribe(format!("dataplatform/file/v1/{dataset_name}/{dataset_version}/created"), QoS::AtLeastOnce).await.unwrap();
+        let source = get_source(source_tag);
+
+        match client.subscribe(
+            format!("dataplatform/file/v1/{}/{}/#", source.id, source.version), 
+            QoS::AtLeastOnce
+        ).await {
+            Ok(_) => tracing::info!("Successfully subscribed to {}", source.id),
+            Err(err) => {
+                tracing::error!("Failed to subscribed to {}", source.id);
+                tracing::error!("{:?}", err);
+            },
+        };
+    }
 
     loop {
+
         let notification = eventloop.poll().await;
 
         let event = match notification {
             Ok(m) => m,
             Err(err) => {
-               error!("{err}");
+               tracing::error!("{err}");
                continue;
             }
         };
 
-        println!("Received = {:?}", event);
-
         if let Event::Incoming(Incoming::Publish(packet)) = event {
+
+            tracing::info!("Recieved message on topic: {}", packet.topic);
             
             let message: Message = match serde_json::from_slice(&packet.payload) {
                 Ok(m) => m,
                 Err(err) => {
-                    error!("{err}");
+                    tracing::error!("{err}");
                     continue;
                 }
             };
 
-            tokio::spawn(update_model(app_state.clone(), message));
+            let message_event;
+
+            if packet.topic.ends_with("created") {
+                message_event = MessageEvent::Created;
+            } else if packet.topic.ends_with("updated") {
+                message_event = MessageEvent::Updated;
+            } else {
+                tracing::warn!("Unkown message event type.");
+                continue;
+            }
+
+            tokio::spawn(update_source(app_state.clone(), message_event, message));
         }
     }
 }
 
-async fn update_model (app_state: AppState, message: Message) {
-    app_state.arome.update_model(message.data).await;
+async fn update_source (app_state: AppState, event: MessageEvent, message: Message) {
+
+    if message.data.dataset_name == "harmonie_arome_cy43_p1" {
+        app_state.arome.update_model(message.data).await;
+    } else if  message.data.dataset_name == "harmonie_arome_cy43_p3" {
+
+    } else if  message.data.dataset_name == "10-minute-in-situ-meteorological-observations" {
+
+    } else {
+        tracing::warn!("Unkown dataset: {}", message.data.dataset_name);
+    }
 }

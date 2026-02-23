@@ -1,9 +1,9 @@
 use serde_derive::Deserialize;
-use tracing::error;
 use std::{fs, env};
 use std::process::exit;
 use toml;
 use lazy_static::lazy_static;
+use crate::knmi::sources::KnmiSourceTag;
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct Server {
@@ -11,9 +11,22 @@ pub struct Server {
 }
 
 #[derive(Deserialize, Debug, Clone)]
+pub struct OpenDataApi {
+    pub token: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct NotificationService {
+    pub url: String,
+    pub port: u16,
+    pub token: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
 pub struct Knmi {
-    pub open_data_api_token: String,
-    pub notification_service_token: String,
+    pub open_data_api: OpenDataApi,
+    pub notification_service: NotificationService,
+    pub sources: Vec<KnmiSourceTag>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -32,15 +45,16 @@ pub fn load_config () -> Config {
     let contents = match fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => {
-            error!("Could not find config.toml file.");
+            tracing::error!("Could not find config.toml file.");
             exit(1);
         }
     };
 
     let config: Config = match toml::from_str(&contents) {
         Ok(d) => d,
-        Err(_) => {
-            error!("Could not read config.toml file.");
+        Err(err) => {
+            tracing::error!("Could not read config.toml file.");
+            tracing::error!("{:?}", err);
             exit(1);
         }
     };
