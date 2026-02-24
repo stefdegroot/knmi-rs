@@ -6,30 +6,34 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-tokio = { version = "1.0", features = ["full", "tracing"] }
+tokio = { version = "1.0", features = ["full", "tracing", "macros", "rt-multi-thread"] }
+tonic = "0.14"
+prost = "0.14"
 tracing = "0.1"
 tracing-subscriber = "0.3"
-console-subscriber = "0.2"
-axum = { version = "0.7.0" }
-reqwest = { version = "0.12", features = ["json", "stream"] }
-listenfd = "1.0.1"
+axum = { version = "0.8" }
+reqwest = { version = "0.13", features = ["json", "stream"] }
+listenfd = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 futures-util = "0.3"
 anyhow = "1.0"
 tokio-tar = "0.3"
-eccodes-sys = "0.5.2"
-eccodes = { version = "0.10.1", features = ["message_ndarray"] }
-lazy_static = "1.4.0"
+eccodes-sys = "0.7"
+eccodes = { version = "0.14", features = ["ndarray"]}
+lazy_static = "1.5"
 chrono = "0.4"
 # peroxide = { version = "0.35.1", features = ["nc"] }
-peroxide = { version = "0.35.1" }
-ndarray = "0.15"
+peroxide = { version = "0.40" }
+ndarray = "0.17"
 # netcdf = { version = "0.7" }
-netcdf = { version = "0.9", features = ["ndarray"] }
-peak_alloc = "0.2.1"
-toml = "0.8.12"
+netcdf = { version = "0.12", features = ["ndarray"] }
+peak_alloc = "0.3"
+toml = "0.9"
 serde_derive = "1.0"
 
-uuid = { version = "1.8.0", features = ["v4"] }
-rumqttc = { version = "0.24", features = ["websocket", "use-rustls"] }
+uuid = { version = "1.21", features = ["v4"] }
+rumqttc = { version = "0.25", features = ["websocket", "use-rustls"] }
+
+[build-dependencies]
+tonic-build = "0.14"

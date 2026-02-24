@@ -6,6 +6,7 @@ use axum::{
     Router,
 };
 
+mod util;
 mod knmi;
 mod config;
 
