@@ -18,3 +18,13 @@ pub async fn list (path: &str) -> Result<Vec<(PathBuf, String)>> {
 
     Ok(files)
 }
+
+#[tokio::test]
+async fn test_list () {
+    
+    let files = list("download/grib").await.unwrap();
+
+    for (_, name) in files {
+        println!("{}", name);
+    }
+} 

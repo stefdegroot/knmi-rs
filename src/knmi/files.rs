@@ -35,7 +35,7 @@ pub async fn list_latest_files() -> Result<Vec<DatasetFile>, ()> {
 
     let reponse = reqwest::Client::new()
         .get(url)
-        .query(&[("maxKeys", "1000")])
+        // .query(&[("maxKeys", "1000")])
         .header("Authorization", &CONFIG.knmi.open_data_api_token)
         .send()
         .await;
