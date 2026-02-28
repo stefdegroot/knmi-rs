@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use crate::config::CONFIG;
 
 #[derive(Deserialize, Debug, Clone)]
 pub enum KnmiSourceTag {
@@ -7,14 +8,14 @@ pub enum KnmiSourceTag {
     RealTimeObservations,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct KnmiSource {
     pub tag: KnmiSourceTag,
     pub id: Box<str>,
     pub version: Box<str>,
 }
 
-pub fn get_source (source: &KnmiSourceTag) -> KnmiSource {
+fn get_source (source: &KnmiSourceTag) -> KnmiSource {
     match source {
         KnmiSourceTag::ForecastNetherlands => KnmiSource {
             tag: KnmiSourceTag::ForecastNetherlands,
@@ -32,4 +33,15 @@ pub fn get_source (source: &KnmiSourceTag) -> KnmiSource {
             version: "1.0".into(),
         },
     }
+}
+
+pub fn load_sources_from_config () -> Vec<KnmiSource> {
+
+    let mut sources = vec![];
+
+    for source_tag in &CONFIG.knmi.sources {
+        sources.push(get_source(source_tag))
+    }
+
+    sources
 }

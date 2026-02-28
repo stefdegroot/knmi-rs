@@ -2,11 +2,7 @@ use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS, Transport };
 use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use crate::{
-    AppState,
-    knmi::sources::get_source,
-    config::CONFIG,
-};
+use crate::{AppState, config::CONFIG};
 
 pub enum MessageEvent {
     Created,
@@ -49,10 +45,7 @@ pub async fn sub_knmi_notifications (app_state: AppState) {
 
     let (client, mut eventloop) = AsyncClient::new(mqtt_options, 10);
 
-    for source_tag in &CONFIG.knmi.sources {
-
-        let source = get_source(source_tag);
-
+    for source in app_state.sources.iter() {
         match client.subscribe(
             format!("dataplatform/file/v1/{}/{}/#", source.id, source.version), 
             QoS::AtLeastOnce
@@ -108,7 +101,7 @@ pub async fn sub_knmi_notifications (app_state: AppState) {
 async fn update_source (app_state: AppState, event: MessageEvent, message: Message) {
 
     if message.data.dataset_name == "harmonie_arome_cy43_p1" {
-        app_state.arome.update_model(message.data).await;
+        // app_state.arome.update_model(message.data).await;
     } else if  message.data.dataset_name == "harmonie_arome_cy43_p3" {
 
     } else if  message.data.dataset_name == "10-minute-in-situ-meteorological-observations" {

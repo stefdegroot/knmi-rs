@@ -6,14 +6,16 @@ use axum::{
     Router,
 };
 
+use crate::knmi::sources::{KnmiSource, load_sources_from_config};
+
 mod util;
 mod knmi;
 mod config;
 
 #[derive(Clone)]
 pub struct AppState {
-    // config: config::Config,
-    arome: knmi::models::arome::Arome,
+    sources: Box<Vec<KnmiSource>>
+    // arome: knmi::models::arome::Arome,
 }
 
 #[tokio::main]
@@ -22,20 +24,32 @@ async fn main() {
     let subscriber = tracing_subscriber::FmtSubscriber::new();
     tracing::subscriber::set_global_default(subscriber).unwrap(); 
 
-    let arome = knmi::models::arome::Arome::new().await;
+    // let arome = knmi::models::arome::Arome::new().await;
+
+    let sources = load_sources_from_config();
 
     let state = AppState {
-        arome,
+        sources: sources.into(),
+        // arome,
     };
 
     let port = config::CONFIG.server.port;
 
     task::spawn(knmi::notifications::sub_knmi_notifications(state.clone()));
 
-    let app = Router::new()
-        .route("/download", get(knmi::download::download))
-        .route("/weather/knmi-arome", get(knmi::arome::forecast))
-        .with_state(state);
+    let mut app = Router::new();
+
+    for source in state.sources.iter() {
+
+        let path = format!("/{}/{}", source.id, source.version);
+
+        app = app.route(
+            &path, 
+            get(knmi::api::forecast::forecast).with_state(state.clone())
+        );
+        
+        tracing::info!("Setup route: {}", path);
+    }
 
     let mut listenfd = ListenFd::from_env();
     let listener = match listenfd.take_tcp_listener(0).unwrap() {
