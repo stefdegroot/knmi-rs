@@ -41,7 +41,7 @@ async fn load_model () -> Result<GribModel> {
 
         for (key, grid) in data {
 
-            if let Some(_) = GRIB_CODES.get(key.as_str()) {
+            if GRIB_CODES.get(key.as_str()).is_some() {
 
                 if let Some(array_3) = params.get_mut(key.as_str()) {
                     array_3.push(Axis(0), ArrayView::from(&grid)).unwrap();

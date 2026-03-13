@@ -23,11 +23,8 @@ eccodes-sys = "0.7"
 eccodes = { version = "0.14", features = ["ndarray"]}
 lazy_static = "1.5"
 chrono = "0.4"
-# peroxide = { version = "0.35.1", features = ["nc"] }
 peroxide = { version = "0.40" }
 ndarray = "0.17"
-# netcdf = { version = "0.7" }
-netcdf = { version = "0.12", features = ["ndarray"] }
 peak_alloc = "0.3"
 toml = "0.9"
 serde_derive = "1.0"

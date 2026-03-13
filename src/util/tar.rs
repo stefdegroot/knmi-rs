@@ -15,7 +15,7 @@ pub async fn unpack_tar (path: &str, dest: &str) -> Result<()> {
 #[tokio::test]
 async fn test_unpack_tar () {
     let result = unpack_tar(
-        "./download/HARM43_V1_P1_2026022416.tar",
-        "./download/grib",
+        "./download/HARM43_V1_P3_2026031307.tar",
+        "./download/HARM43_V1_P3_2026031307",
     ).await;
 }

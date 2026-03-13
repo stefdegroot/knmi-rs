@@ -2,3 +2,4 @@
 /download/*
 config.toml
 .vscode
+data

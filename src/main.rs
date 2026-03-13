@@ -1,11 +1,9 @@
 use tokio::{task, signal};
 use tokio::net::TcpListener;
 use listenfd::ListenFd;
-use axum::{
-    routing::get,
-    Router,
-};
+use axum::Router;
 
+use crate::knmi::api::Api;
 use crate::knmi::sources::{KnmiSource, load_sources_from_config};
 
 mod util;
@@ -14,8 +12,7 @@ mod config;
 
 #[derive(Clone)]
 pub struct AppState {
-    sources: Box<Vec<KnmiSource>>
-    // arome: knmi::models::arome::Arome,
+    sources: Vec<KnmiSource>
 }
 
 #[tokio::main]
@@ -24,13 +21,10 @@ async fn main() {
     let subscriber = tracing_subscriber::FmtSubscriber::new();
     tracing::subscriber::set_global_default(subscriber).unwrap(); 
 
-    // let arome = knmi::models::arome::Arome::new().await;
-
     let sources = load_sources_from_config();
 
     let state = AppState {
-        sources: sources.into(),
-        // arome,
+        sources,
     };
 
     let port = config::CONFIG.server.port;
@@ -40,15 +34,7 @@ async fn main() {
     let mut app = Router::new();
 
     for source in state.sources.iter() {
-
-        let path = format!("/{}/{}", source.id, source.version);
-
-        app = app.route(
-            &path, 
-            get(knmi::api::forecast::forecast).with_state(state.clone())
-        );
-        
-        tracing::info!("Setup route: {}", path);
+        app = source.set_route(app, state.clone());
     }
 
     let mut listenfd = ListenFd::from_env();

@@ -2,7 +2,7 @@ use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS, Transport };
 use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use crate::{AppState, config::CONFIG};
+use crate::{AppState, KnmiSource, config::CONFIG};
 
 pub enum MessageEvent {
     Created,
@@ -46,16 +46,7 @@ pub async fn sub_knmi_notifications (app_state: AppState) {
     let (client, mut eventloop) = AsyncClient::new(mqtt_options, 10);
 
     for source in app_state.sources.iter() {
-        match client.subscribe(
-            format!("dataplatform/file/v1/{}/{}/#", source.id, source.version), 
-            QoS::AtLeastOnce
-        ).await {
-            Ok(_) => tracing::info!("Successfully subscribed to {}", source.id),
-            Err(err) => {
-                tracing::error!("Failed to subscribed to {}", source.id);
-                tracing::error!("{:?}", err);
-            },
-        };
+        source.subscribe(&client).await;
     }
 
     loop {
@@ -100,13 +91,32 @@ pub async fn sub_knmi_notifications (app_state: AppState) {
 
 async fn update_source (app_state: AppState, event: MessageEvent, message: Message) {
 
-    if message.data.dataset_name == "harmonie_arome_cy43_p1" {
-        // app_state.arome.update_model(message.data).await;
-    } else if  message.data.dataset_name == "harmonie_arome_cy43_p3" {
+    for source in app_state.sources.iter() {
+        if source.id == message.data.dataset_name.clone().into() {
+            source.update_model(message.data).await;
+            return;
+        }
+    }
 
-    } else if  message.data.dataset_name == "10-minute-in-situ-meteorological-observations" {
+    tracing::warn!("Unkown dataset: {}", message.data.dataset_name);
+}
 
-    } else {
-        tracing::warn!("Unkown dataset: {}", message.data.dataset_name);
+trait Notifications {
+    async fn subscribe (&self, client: &rumqttc::AsyncClient) -> ();
+}
+
+impl Notifications for KnmiSource {
+
+    async fn subscribe (&self, client: &rumqttc::AsyncClient) {
+        match client.subscribe(
+            format!("dataplatform/file/v1/{}/{}/#", self.id, self.version), 
+            QoS::AtLeastOnce
+        ).await {
+            Ok(_) => tracing::info!("Successfully subscribed to {}", self.id),
+            Err(err) => {
+                tracing::error!("Failed to subscribed to {}", self.id);
+                tracing::error!("{:?}", err);
+            },
+        };
     }
 }
